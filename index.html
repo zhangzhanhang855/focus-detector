@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI 专注力监督工具 (带校准版)</title>
+    <title>AI 专注力监督工具 (本地模型+校准版)</title>
     <script defer src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
     <style>
         body {
@@ -36,11 +36,13 @@
             width: 600px;
             transition: all 0.3s ease;
         }
+        /* 状态颜色样式 */
         .status-good { background-color: #d4edda; color: #155724; }
         .status-warning { background-color: #fff3cd; color: #856404; }
         .status-danger { background-color: #f8d7da; color: #721c24; }
         .status-info { background-color: #cce5ff; color: #004085; }
         
+        /* 校准按钮样式 */
         #calibrate-btn {
             margin-top: 15px;
             padding: 10px 20px;
@@ -50,16 +52,16 @@
             border: none;
             border-radius: 5px;
             cursor: pointer;
-            display: none; /* 初始隐藏，等模型加载完再显示 */
+            display: none; /* 初始隐藏，等摄像头准备好再显示 */
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
         }
         #calibrate-btn:hover { background-color: #0056b3; }
-        #calibrate-btn:disabled { background-color: #cccccc; cursor: not-allowed; }
     </style>
 </head>
 <body>
 
     <h1>👀 专注力监督工具</h1>
-    <p>请保持面部在画面中央。</p>
+    <p>请保持面部在画面中央，并使用下方按钮记录你的正常坐姿。</p>
 
     <div class="monitor-container">
         <video id="video" autoplay muted></video>
@@ -69,7 +71,7 @@
     <button id="calibrate-btn">🎯 点击记录当前姿势为“正常标准”</button>
 
     <div id="status-panel" class="status-warning">
-        ⏳ 正在加载 AI 模型，请稍候...
+        ⏳ 正在从本地加载 AI 模型，请稍候...
     </div>
 
     <script>
@@ -77,26 +79,27 @@
         const statusPanel = document.getElementById('status-panel');
         const calibrateBtn = document.getElementById('calibrate-btn');
         
-        // 替换为国内访问更稳定的 CDN 节点
-        const MODEL_URL = 'https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js@master/weights';
+        // 【关键修改点】读取同目录下的 weights 文件夹内的本地模型
+        const MODEL_URL = './weights';
 
-
+        // 状态变量
         let noFaceFrames = 0;
-        const NO_FACE_THRESHOLD = 30; 
+        const NO_FACE_THRESHOLD = 30; // 容忍连续多少帧没有检测到脸
         
-        // 新增：基准比例和当前比例
-        let baselineRatio = null; 
-        let currentRatio = 0;
-        // 容忍度：当前比例比基准比例低多少时触发警报？（可根据实际情况微调这个数值，建议 0.03 - 0.05）
-        const TOLERANCE = 0.04; 
+        let baselineRatio = null; // 校准后的基准面部比例
+        let currentRatio = 0;     // 当前实时的面部比例
+        const TOLERANCE = 0.04;   // 容忍度：当前比例比基准低多少时报警（可微调）
 
+        // 1. 异步加载人脸识别模型 (从本地)
         Promise.all([
             faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL),
             faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL)
         ]).then(startVideo).catch(err => {
-            updateStatus("❌ 模型加载失败，请检查网络。", "status-danger");
+            updateStatus("❌ 本地模型加载失败，请检查 weights 文件夹位置。", "status-danger");
+            console.error(err);
         });
 
+        // 2. 调用设备摄像头
         function startVideo() {
             navigator.mediaDevices.getUserMedia({ video: true })
                 .then(stream => {
@@ -104,44 +107,54 @@
                     updateStatus("🔵 请保持写作业的正常姿势，然后点击上方按钮进行校准", "status-info");
                     calibrateBtn.style.display = "block"; // 显示校准按钮
                 })
-                .catch(err => updateStatus("❌ 无法访问摄像头。", "status-danger"));
+                .catch(err => {
+                    updateStatus("❌ 无法访问摄像头，请检查浏览器权限。", "status-danger");
+                    console.error(err);
+                });
         }
 
-        // 校准按钮点击事件
+        // 3. 校准按钮点击事件
         calibrateBtn.addEventListener('click', () => {
             if (currentRatio > 0) {
                 baselineRatio = currentRatio;
-                calibrateBtn.innerText = "✅ 校准成功 (可再次点击重新校准)";
+                calibrateBtn.innerText = "✅ 校准成功 (如需调整可再次点击)";
                 calibrateBtn.style.backgroundColor = "#28a745";
-                updateStatus("✅ 监控已启动，请开始学习！", "status-good");
+                updateStatus("✅ 监控已启动，请专注学习！", "status-good");
             } else {
                 alert("未检测到面部，无法校准，请将脸部移入画面。");
             }
         });
 
+        // 4. 实时分析视频帧
         video.addEventListener('play', () => {
             const canvas = document.getElementById('canvas');
             const displaySize = { width: video.width, height: video.height };
             faceapi.matchDimensions(canvas, displaySize);
 
             setInterval(async () => {
+                // 检测人脸并获取关键点
                 const detections = await faceapi.detectAllFaces(video, new faceapi.TinyFaceDetectorOptions()).withFaceLandmarks();
                 const resizedDetections = faceapi.resizeResults(detections, displaySize);
                 
+                // 清除上一帧的画布
                 canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height);
 
                 if (resizedDetections.length === 0) {
+                    // 没有检测到人脸
                     currentRatio = 0;
                     noFaceFrames++;
                     if (baselineRatio !== null && noFaceFrames > NO_FACE_THRESHOLD) {
                         updateStatus("⚠️ 未检测到人脸！是不是跑神了？", "status-danger");
                     }
                 } else {
-                    noFaceFrames = 0;
+                    noFaceFrames = 0; // 重置计数器
                     const landmarks = resizedDetections[0].landmarks;
+                    
+                    // 获取面部关键点
                     const nose = landmarks.getNose();
                     const jawOutline = landmarks.getJawOutline();
                     
+                    // 计算特征点位置
                     const noseBottomY = nose[3].y;
                     const chinY = jawOutline[8].y; 
                     const faceHeight = chinY - jawOutline[0].y; 
@@ -149,19 +162,19 @@
                     // 实时计算当前面部比例
                     currentRatio = (chinY - noseBottomY) / faceHeight;
 
-                    // 如果已经校准过，才进行监控判断
+                    // 如果已经完成校准，才开始执行低头判定逻辑
                     if (baselineRatio !== null) {
-                        // 如果当前比例低于基准比例减去容忍度，判定为过度低头
                         if (currentRatio < (baselineRatio - TOLERANCE)) { 
-                            updateStatus("❌ 头太低了！对颈椎不好，抬起来点！", "status-warning");
+                            updateStatus("❌ 头太低了！注意颈椎，抬起来点！", "status-warning");
                         } else {
                             updateStatus("✅ 状态良好，继续保持！", "status-good");
                         }
                     }
                 }
-            }, 200);
+            }, 200); // 每 200 毫秒检测一次
         });
 
+        // 辅助函数：更新界面文字和颜色状态
         function updateStatus(text, className) {
             if (statusPanel.innerText !== text) {
                 statusPanel.innerText = text;
