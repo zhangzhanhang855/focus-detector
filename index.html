@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI 专注力监督工具 (带校准版)</title>
+    <script defer src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #f4f7f6;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 20px;
+            margin: 0;
+        }
+        h1 { color: #333; margin-bottom: 5px;}
+        .monitor-container {
+            position: relative;
+            margin-top: 20px;
+            border: 5px solid #ddd;
+            border-radius: 10px;
+            overflow: hidden;
+            background-color: #000;
+        }
+        video { display: block; width: 640px; height: 480px; }
+        canvas { position: absolute; top: 0; left: 0; }
+        #status-panel {
+            margin-top: 20px;
+            padding: 15px 30px;
+            border-radius: 8px;
+            font-size: 24px;
+            font-weight: bold;
+            text-align: center;
+            width: 600px;
+            transition: all 0.3s ease;
+        }
+        .status-good { background-color: #d4edda; color: #155724; }
+        .status-warning { background-color: #fff3cd; color: #856404; }
+        .status-danger { background-color: #f8d7da; color: #721c24; }
+        .status-info { background-color: #cce5ff; color: #004085; }
+        
+        #calibrate-btn {
+            margin-top: 15px;
+            padding: 10px 20px;
+            font-size: 18px;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            display: none; /* 初始隐藏，等模型加载完再显示 */
+        }
+        #calibrate-btn:hover { background-color: #0056b3; }
+        #calibrate-btn:disabled { background-color: #cccccc; cursor: not-allowed; }
+    </style>
+</head>
+<body>
+
+    <h1>👀 专注力监督工具</h1>
+    <p>请保持面部在画面中央。</p>
+
+    <div class="monitor-container">
+        <video id="video" autoplay muted></video>
+        <canvas id="canvas"></canvas>
+    </div>
+    
+    <button id="calibrate-btn">🎯 点击记录当前姿势为“正常标准”</button>
+
+    <div id="status-panel" class="status-warning">
+        ⏳ 正在加载 AI 模型，请稍候...
+    </div>
+
+    <script>
+        const video = document.getElementById('video');
+        const statusPanel = document.getElementById('status-panel');
+        const calibrateBtn = document.getElementById('calibrate-btn');
+        
+        const MODEL_URL = 'https://justadudewhohacks.github.io/face-api.js/models';
+
+        let noFaceFrames = 0;
+        const NO_FACE_THRESHOLD = 30; 
+        
+        // 新增：基准比例和当前比例
+        let baselineRatio = null; 
+        let currentRatio = 0;
+        // 容忍度：当前比例比基准比例低多少时触发警报？（可根据实际情况微调这个数值，建议 0.03 - 0.05）
+        const TOLERANCE = 0.04; 
+
+        Promise.all([
+            faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL),
+            faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL)
+        ]).then(startVideo).catch(err => {
+            updateStatus("❌ 模型加载失败，请检查网络。", "status-danger");
+        });
+
+        function startVideo() {
+            navigator.mediaDevices.getUserMedia({ video: true })
+                .then(stream => {
+                    video.srcObject = stream;
+                    updateStatus("🔵 请保持写作业的正常姿势，然后点击上方按钮进行校准", "status-info");
+                    calibrateBtn.style.display = "block"; // 显示校准按钮
+                })
+                .catch(err => updateStatus("❌ 无法访问摄像头。", "status-danger"));
+        }
+
+        // 校准按钮点击事件
+        calibrateBtn.addEventListener('click', () => {
+            if (currentRatio > 0) {
+                baselineRatio = currentRatio;
+                calibrateBtn.innerText = "✅ 校准成功 (可再次点击重新校准)";
+                calibrateBtn.style.backgroundColor = "#28a745";
+                updateStatus("✅ 监控已启动，请开始学习！", "status-good");
+            } else {
+                alert("未检测到面部，无法校准，请将脸部移入画面。");
+            }
+        });
+
+        video.addEventListener('play', () => {
+            const canvas = document.getElementById('canvas');
+            const displaySize = { width: video.width, height: video.height };
+            faceapi.matchDimensions(canvas, displaySize);
+
+            setInterval(async () => {
+                const detections = await faceapi.detectAllFaces(video, new faceapi.TinyFaceDetectorOptions()).withFaceLandmarks();
+                const resizedDetections = faceapi.resizeResults(detections, displaySize);
+                
+                canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height);
+
+                if (resizedDetections.length === 0) {
+                    currentRatio = 0;
+                    noFaceFrames++;
+                    if (baselineRatio !== null && noFaceFrames > NO_FACE_THRESHOLD) {
+                        updateStatus("⚠️ 未检测到人脸！是不是跑神了？", "status-danger");
+                    }
+                } else {
+                    noFaceFrames = 0;
+                    const landmarks = resizedDetections[0].landmarks;
+                    const nose = landmarks.getNose();
+                    const jawOutline = landmarks.getJawOutline();
+                    
+                    const noseBottomY = nose[3].y;
+                    const chinY = jawOutline[8].y; 
+                    const faceHeight = chinY - jawOutline[0].y; 
+
+                    // 实时计算当前面部比例
+                    currentRatio = (chinY - noseBottomY) / faceHeight;
+
+                    // 如果已经校准过，才进行监控判断
+                    if (baselineRatio !== null) {
+                        // 如果当前比例低于基准比例减去容忍度，判定为过度低头
+                        if (currentRatio < (baselineRatio - TOLERANCE)) { 
+                            updateStatus("❌ 头太低了！对颈椎不好，抬起来点！", "status-warning");
+                        } else {
+                            updateStatus("✅ 状态良好，继续保持！", "status-good");
+                        }
+                    }
+                }
+            }, 200);
+        });
+
+        function updateStatus(text, className) {
+            if (statusPanel.innerText !== text) {
+                statusPanel.innerText = text;
+                statusPanel.className = className;
+            }
+        }
+    </script>
+</body>
+</html>
